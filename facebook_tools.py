@@ -10,7 +10,6 @@ import os, time, csv, random
 from selenium import webdriver
 
 
-
 import re
 import json
 from dotenv import load_dotenv
@@ -319,12 +318,6 @@ return out;
 """
 
 
-def make_driver():
-    o = webdriver.ChromeOptions()
-    o.page_load_strategy = "eager"
-    o.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
-    return webdriver.Chrome(options=o)
-
 
 def collect_links(driver, container_xpath=""):
     seen = set(open(LINKS_FILE, encoding="utf-8").read().split()) if os.path.exists(LINKS_FILE) else set()
@@ -392,33 +385,83 @@ def scrape_profile(driver, url):
     return [name, url] + [", ".join(data[t]) for t in TITLES]
 
 
+# def scrape_all(driver):
+#     links = open(LINKS_FILE, encoding="utf-8").read().split()
+#     idx = int(open(CP_FILE).read()) if os.path.exists(CP_FILE) else 0
+#     new_file = not os.path.exists(CSV_FILE)
+#     done = 0
+#     with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
+#         w = csv.writer(f)
+#         if new_file:
+#             w.writerow(["Profile Name", "Profile URL"] + TITLES)
+#         while idx < len(links) and done < BATCH_SIZE:
+#             try:
+#                 w.writerow(scrape_profile(driver, links[idx]))
+#                 f.flush()
+#                 print(idx + 1, "/", len(links))
+#             except Exception as e:
+#                 msg = str(e).lower()
+#                 if "invalid session" in msg or "disconnected" in msg or "no such window" in msg:
+#                     print("Session lost, stopping.")
+#                     break
+#                 print("Skip:", links[idx], type(e).__name__)
+#             idx += 1
+#             done += 1
+#             with open(CP_FILE, "w") as c:
+#                 c.write(str(idx))
+#             time.sleep(random.uniform(*DELAY))
+#     print(f"Batch complete. Next index: {idx} / {len(links)}")
+
+def save_batch(f, w, buffer, idx):
+    w.writerows(buffer)
+    f.flush()
+    os.fsync(f.fileno())              # pehle CSV disk par
+    tmp = CP_FILE + ".tmp"
+    with open(tmp, "w") as c:
+        c.write(str(idx))
+    os.replace(tmp, CP_FILE)          # phir checkpoint
+    buffer.clear()
+
+
 def scrape_all(driver):
     links = open(LINKS_FILE, encoding="utf-8").read().split()
     idx = int(open(CP_FILE).read()) if os.path.exists(CP_FILE) else 0
     new_file = not os.path.exists(CSV_FILE)
-    done = 0
-    with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
+    done, fails, buffer = 0, 0, []
+    SAVE_EVERY, MAX_FAILS = 500, 5
+
+    with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f, \
+         open("failed.txt", "a", encoding="utf-8") as bad:
         w = csv.writer(f)
         if new_file:
             w.writerow(["Profile Name", "Profile URL"] + TITLES)
-        while idx < len(links) and done < BATCH_SIZE:
-            try:
-                w.writerow(scrape_profile(driver, links[idx]))
-                f.flush()
-                print(idx + 1, "/", len(links))
-            except Exception as e:
-                msg = str(e).lower()
-                if "invalid session" in msg or "disconnected" in msg or "no such window" in msg:
-                    print("Session lost, stopping.")
-                    break
-                print("Skip:", links[idx], type(e).__name__)
-            idx += 1
-            done += 1
-            with open(CP_FILE, "w") as c:
-                c.write(str(idx))
-            time.sleep(random.uniform(*DELAY))
-    print(f"Batch complete. Next index: {idx} / {len(links)}")
+        try:
+            while idx < len(links) and done < BATCH_SIZE:
+                try:
+                    buffer.append(scrape_profile(driver, links[idx]))
+                    fails = 0
+                    print(idx + 1, "/", len(links))
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "invalid session" in msg or "disconnected" in msg or "no such window" in msg:
+                        print("Session lost, stopping.")
+                        break                     # idx aage nahi barha
+                    fails += 1
+                    bad.write(links[idx] + "\n"); bad.flush()
+                    print("Skip:", links[idx], type(e).__name__)
+                    if fails >= MAX_FAILS:
+                        print("Too many failures, stopping.")
+                        idx += 1
+                        break
+                idx += 1
+                done += 1
+                if len(buffer) >= SAVE_EVERY:
+                    save_batch(f, w, buffer, idx)
+                time.sleep(random.uniform(*DELAY))
+        finally:
+            save_batch(f, w, buffer, idx)
 
+    print(f"Batch complete. Next index: {idx} / {len(links)}")
 
 def process_followers(driver, container_xpath=""):
     if not os.path.exists(DONE_FLAG):
